@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Schema – Smågrupp</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Schema – Smågrupp</h1>
+    <div class="actions">
+      <button id="btnAddLesson" class="btn primary">Lägg till lektion</button>
+      <button id="btnEditLesson" class="btn">Redigera lektion (klicka i schemat)</button>
+      <div class="divider"></div>
+      <button id="btnAddStudent" class="btn">Lägg till elev</button>
+      <button id="btnEditStudent" class="btn">Redigera elev (klicka i listan)</button>
+      <div class="divider"></div>
+      <label class="select-wrap">
+        <span>Dag:</span>
+        <select id="weekdaySelect" title="Välj veckodag"></select>
+      </label>
+      <button id="btnToday" class="btn ghost">Idag</button>
+      <div class="divider"></div>
+      <button id="btnPrintPDF" class="btn">Skriv ut dagens schema (PDF)</button>
+      <button id="btnExport" class="btn ghost">Exportera databas (JSON)</button>
+      <label class="file-btn btn ghost">
+        Importera databas
+        <input id="importFile" type="file" accept="application/json" />
+      </label>
+      <button id="btnNewDB" class="btn danger">Ny tom databas</button>
+      <div class="divider"></div>
+      <button id="btnOpenFile" class="btn ghost">Öppna fil…</button>
+      <button id="btnSaveFile" class="btn ghost">Spara som fil…</button>
+      <button id="btnReconnect" class="btn ghost" style="display:none;">Återanslut fil</button>
+      <button id="btnSettings" class="btn ghost icon" title="Inställningar">⚙️</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="column">
+      <h2>Mix</h2>
+      <div id="mixContainer" class="lesson-list"></div>
+    </section>
+    <section class="column">
+      <h2>Stor klass</h2>
+      <div id="bigContainer" class="lesson-list"></div>
+    </section>
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Elevlista</h2>
+        <label class="search">
+          <input id="studentSearch" type="text" placeholder="Sök elev..." />
+        </label>
+      </div>
+      <div class="student-legend">
+        <span class="legend-pill inclass" title="På lektion"></span> På lektion
+        <span class="legend-pill break" title="Rast"></span> Rast
+        <span class="legend-pill absent" title="Frånvarande"></span> Frånvaro
+      </div>
+      <div id="studentList" class="student-list"></div>
+      <p class="hint small">Tips: Klicka på en elevrad eller lektionshuvud för att redigera.</p>
+    </aside>
+  </main>
+
+  <!-- Dialog: Add/Edit Lesson -->
+  <dialog id="lessonDialog">
+    <form id="lessonForm" method="dialog">
+      <h3 id="lessonDialogTitle">Ny lektion</h3>
+      <div class="form-grid">
+        <label>Ämne
+          <input name="subject" required placeholder="t.ex. Svenska" />
+        </label>
+        <label>Plats
+          <select name="placeType" required>
+            <option value="Mix">Mix</option>
+            <option value="Stor klass">Stor klass</option>
+          </select>
+        </label>
+        <label>Sal
+          <input name="room" placeholder="t.ex. A12" />
+        </label>
+        <label>Veckodag
+          <select name="weekday" required></select>
+        </label>
+        <label>Starttid
+          <input name="start" type="time" required />
+        </label>
+        <label>Sluttid
+          <input name="end" type="time" required />
+        </label>
+
+        <label>Resurs (valfritt)
+          <input name="resource" placeholder="t.ex. Måns / elevassistent / resurs" />
+        </label>
+
+        <label>Färg
+          <div class="color-row">
+            <button type="button" id="btnPickLessonColor" class="btn">Välj färg…</button>
+            <span id="lessonColorSwatch" class="color-swatch" aria-hidden="true"></span>
+            <input id="lessonColor" name="color" type="color" value="#1d4ed8" class="visually-hidden">
+          </div>
+        </label>
+
+        <label class="span-2">Kommentar (valfritt)
+          <textarea name="comment" rows="3" placeholder="Skriv en kort notis om lektionen…"></textarea>
+        </label>
+
+        <label>Elever (håll Ctrl/Cmd för fler)
+          <select name="students" id="lessonStudentsSelect" multiple size="8"></select>
+        </label>
+      </div>
+      <menu>
+        <button value="cancel" class="btn ghost">Avbryt</button>
+        <button value="save" class="btn primary">Spara</button>
+        <button id="btnDeleteLesson" class="btn danger left" type="button" hidden>Ta bort</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Dialog: Edit Student -->
+  <dialog id="studentDialog">
+    <form id="studentForm" method="dialog">
+      <h3 id="studentDialogTitle">Ny elev</h3>
+      <div class="form-grid">
+        <label>Namn
+          <input name="name" required placeholder="För- och efternamn" />
+        </label>
+        <label>Klass (t.ex. 7A, 8B)
+          <input name="klass" required pattern="^[7-9][A-ZÅÄÖ]?$" />
+        </label>
+      </div>
+      <menu>
+        <button value="cancel" class="btn ghost">Avbryt</button>
+        <button value="save" class="btn primary">Spara</button>
+        <button id="btnDeleteStudent" class="btn danger left" type="button" hidden>Ta bort</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settingsDialog">
+    <form id="settingsForm" method="dialog">
+      <h3>Inställningar & delning</h3>
+      <div class="form-grid">
+        <label>Datakälla-URL (läs in schema från länk – t.ex. OneDrive/GitHub/Gist)
+          <input name="dataUrl" placeholder="https://..." />
+        </label>
+        <label>Pollningsintervall (sekunder, 0 = av)
+          <input name="pollSeconds" type="number" min="0" step="5" />
+        </label>
+        <label>Konfliktikon (PNG/SVG). Din ikon används i visningen.
+          <input name="conflictIcon" type="file" accept="image/png, image/svg+xml" />
+        </label>
+      </div>
+      <p class="hint">
+        <strong>Lagring:</strong> Autosparar i webbläsaren. Koppla även till fil via “Spara som fil…” för att skriva till JSON.
+        <br><strong>OneDrive:</strong> appen försöker automatiskt tolka vanliga OneDrive-länkar i följ-läget, men bäst är en direkt nedladdningslänk till JSON.
+      </p>
+      <menu>
+        <button value="cancel" class="btn ghost">Stäng</button>
+        <button value="save" class="btn primary">Spara</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <footer class="footer">
+    <span id="storageInfo">Lagring: Lokal webbläsare</span>
+    <span>&nbsp;•&nbsp;</span>
+    <span id="statusText">Klar</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
