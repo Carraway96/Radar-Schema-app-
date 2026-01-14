@@ -1,4 +1,4 @@
-/* Schema – Smågrupp (v1.6) — per-lesson comment + resource + improved OneDrive follow */
+/* Schema – Smågrupp (v1.6) — per-lesson comment + resource + improved OneDrive/SharePoint follow */
 (function () {
   const $ = (sel, el=document) => el.querySelector(sel);
   const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
@@ -146,7 +146,7 @@
       const tx = dbx.transaction(IDXDB_STORE, "readonly");
       const req = tx.objectStore(IDXDB_STORE).get(key);
       req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(tx.error);
     });
   }
   async function persistHandle(h){ try { await idbSet("dbFileHandle", h); } catch(e){ console.warn("Kunde inte spara file handle:", e); } }
@@ -461,30 +461,70 @@
     saveSettings(); setupPolling(); render();
   }
 
-  function looksLikeOneDrive(url){
-    return /(^|\/\/)(1drv\.ms|onedrive\.live\.com)\//i.test(url);
+  function looksLikeHtml(text, contentType){
+    const t = (text || "").trimStart();
+    if (contentType && /text\/html/i.test(contentType)) return true;
+    return t.startsWith("<!doctype") || t.startsWith("<html") || t.startsWith("<");
   }
 
-  function toOneDriveDownloadUrl(url){
+  function buildCandidateUrls(originalUrl){
+    const u = String(originalUrl || "").trim();
+    if (!u) return [];
+    const urls = [];
+
+    const withParam = (url, key, val) => {
+      try {
+        const x = new URL(url);
+        x.searchParams.set(key, val);
+        return x.toString();
+      } catch {
+        const hasQ = url.includes("?");
+        return url + (hasQ ? "&" : "?") + encodeURIComponent(key) + "=" + encodeURIComponent(val);
+      }
+    };
+
+    // 1) original
+    urls.push(u);
+
+    // 2) Common "force file" params (often needed for OneDrive/SharePoint)
+    urls.push(withParam(u, "download", "1"));
+    urls.push(withParam(u, "raw", "1"));
+    urls.push(withParam(u, "web", "0"));
+
+    // 3) If it's OneDrive live share page, try converting to /download endpoint
+    //    (works for links like https://onedrive.live.com/?cid=...&resid=...&authkey=...)
     try{
-      const u = new URL(url);
-      if (!/onedrive\.live\.com$/i.test(u.hostname)) return null;
-      const p = u.pathname.toLowerCase();
-      if (p.includes("/download")) return u.toString();
-      const cid = u.searchParams.get("cid");
-      const resid = u.searchParams.get("resid") || u.searchParams.get("id");
-      const authkey = u.searchParams.get("authkey");
-      if (!cid || !resid) return null;
-      const d = new URL("https://onedrive.live.com/download");
-      d.searchParams.set("cid", cid);
-      d.searchParams.set("resid", resid);
-      if (authkey) d.searchParams.set("authkey", authkey);
-      return d.toString();
-    }catch{ return null; }
+      const parsed = new URL(u);
+      if (/onedrive\.live\.com$/i.test(parsed.hostname)) {
+        const cid = parsed.searchParams.get("cid");
+        const resid = parsed.searchParams.get("resid") || parsed.searchParams.get("id");
+        const authkey = parsed.searchParams.get("authkey");
+        if (cid && resid) {
+          const d = new URL("https://onedrive.live.com/download");
+          d.searchParams.set("cid", cid);
+          d.searchParams.set("resid", resid);
+          if (authkey) d.searchParams.set("authkey", authkey);
+          urls.push(d.toString());
+        }
+      }
+    }catch{}
+
+    // 4) Extra SharePoint-ish variants
+    if (/my\.sharepoint\.com/i.test(u) || /sharepoint\.com/i.test(u) || /1drv\.ms/i.test(u)) {
+      if (!/[\?&]download=1/i.test(u)) urls.push(u + (u.includes("?") ? "&" : "?") + "download=1");
+      urls.push(withParam(withParam(u, "download", "1"), "web", "0"));
+    }
+
+    // De-dup
+    return Array.from(new Set(urls));
   }
 
   async function fetchText(url){
-    const res = await fetch(url, {cache:"no-store", redirect:"follow"});
+    const res = await fetch(url, {
+      cache: "no-store",
+      redirect: "follow",
+      headers: { "Accept": "application/json,text/plain,*/*" }
+    });
     const text = await res.text();
     return { ok: res.ok, status: res.status, text, finalUrl: res.url || url, contentType: res.headers.get("content-type") || "" };
   }
@@ -495,39 +535,58 @@
     let lastHash=null;
 
     const tick=async()=>{
+      const candidates = buildCandidateUrls(follow.dataUrl);
+
       try{
         setStatus("Hämtar datakälla…");
 
-        let url = follow.dataUrl;
-        // If user pasted a typical OneDrive share page link, try to convert it to a direct download URL.
-        if (looksLikeOneDrive(url)) {
-          const dl = toOneDriveDownloadUrl(url);
-          if (dl) url = dl;
-        }
+        let lastErr = null;
 
-        let res = await fetchText(url);
-        if(!res.ok) throw new Error("Kunde inte hämta datakälla.");
+        for (const url of candidates) {
+          try{
+            const res = await fetchText(url);
+            if(!res.ok){
+              lastErr = new Error(`HTTP ${res.status}`);
+              continue;
+            }
 
-        // If OneDrive returned an HTML share page (common), try once more using a derived download URL from final URL.
-        const seemsHtml = /text\/html/i.test(res.contentType) || /^\s*<!doctype html/i.test(res.text) || /<html[\s>]/i.test(res.text);
-        if (seemsHtml && looksLikeOneDrive(res.finalUrl)) {
-          const dl2 = toOneDriveDownloadUrl(res.finalUrl);
-          if (dl2 && dl2 !== url) {
-            res = await fetchText(dl2);
+            // If we got an HTML page, it's almost certainly a share/preview page, not the raw JSON file
+            if (looksLikeHtml(res.text, res.contentType)) {
+              lastErr = new Error("Fick HTML (förhandsvisningssida) istället för JSON.");
+              continue;
+            }
+
+            const hash=await digest(res.text);
+            if(hash!==lastHash){
+              let json;
+              try{
+                json = JSON.parse(res.text);
+              }catch(e){
+                lastErr = new Error("Kunde inte tolka som JSON (fel fil/länk).");
+                continue;
+              }
+
+              if(json.students&&json.lessons){
+                db=json; saveDB(); render(); showToast("Datakälla uppdaterad."); lastHash=hash;
+              } else {
+                lastErr = new Error("Datakälla saknar students/lessons.");
+                continue;
+              }
+            }
+
+            setStatus("Klar");
+            return; // success
+          }catch(e){
+            // CORS / network errors often land here as TypeError: Failed to fetch
+            lastErr = e;
+            continue;
           }
         }
 
-        const text = res.text;
-        const hash=await digest(text);
-        if(hash!==lastHash){
-          const json=JSON.parse(text);
-          if(json.students&&json.lessons){
-            db=json; saveDB(); render(); showToast("Datakälla uppdaterad."); lastHash=hash;
-          } else {
-            throw new Error("Datakälla saknar students/lessons.");
-          }
-        }
-        setStatus("Klar");
+        setStatus("Fel vid hämtning");
+        console.warn("Datakälla misslyckades. Testade länkar:", candidates);
+        console.warn("Senaste fel:", lastErr);
+
       }catch(err){
         setStatus("Fel vid hämtning");
         console.warn(err);
