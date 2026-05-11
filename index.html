@@ -8,33 +8,21 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Radar</h1>
-    <div class="actions">
-      <button id="btnAddLesson" class="btn primary">Lägg till lektion</button>
-      <button id="btnEditLesson" class="btn">Redigera lektion (klicka i schemat)</button>
-      <div class="divider"></div>
-      <button id="btnAddStudent" class="btn">Lägg till elev</button>
-      <button id="btnEditStudent" class="btn">Redigera elev (klicka i listan)</button>
-      <div class="divider"></div>
+    <div class="brand">
+      <h1>Radar</h1>
+      <span>Schema</span>
+    </div>
+    <nav class="actions" aria-label="Huvudmeny">
+      <button id="btnAddLesson" class="btn primary">Ny lektion</button>
+      <button id="btnAddStudent" class="btn">Ny elev</button>
       <label class="select-wrap">
-        <span>Dag:</span>
+        <span>Dag</span>
         <select id="weekdaySelect" title="Välj veckodag"></select>
       </label>
       <button id="btnToday" class="btn ghost">Idag</button>
-      <div class="divider"></div>
-      <button id="btnPrintPDF" class="btn">Skriv ut dagens schema (PDF)</button>
-      <button id="btnExport" class="btn ghost">Exportera databas (JSON)</button>
-      <label class="file-btn btn ghost">
-        Importera databas
-        <input id="importFile" type="file" accept="application/json" />
-      </label>
-      <button id="btnNewDB" class="btn danger">Ny tom databas</button>
-      <div class="divider"></div>
-      <button id="btnOpenFile" class="btn ghost">Öppna fil…</button>
-      <button id="btnSaveFile" class="btn ghost">Spara som fil…</button>
-      <button id="btnReconnect" class="btn ghost" style="display:none;">Återanslut fil</button>
-      <button id="btnSettings" class="btn ghost icon" title="Inställningar">⚙️</button>
-    </div>
+      <button id="btnOpenFile" class="btn ghost">Koppla databas</button>
+      <button id="btnSettings" class="btn ghost icon" title="Inställningar" aria-label="Inställningar">☰</button>
+    </nav>
   </header>
 
   <main class="layout">
@@ -98,7 +86,7 @@
           <div class="color-row">
             <button type="button" id="btnPickLessonColor" class="btn">Välj färg…</button>
             <span id="lessonColorSwatch" class="color-swatch" aria-hidden="true"></span>
-            <input id="lessonColor" name="color" type="color" value="#1d4ed8" class="visually-hidden">
+            <input id="lessonColor" name="color" type="color" value="#2d7f89" class="visually-hidden">
           </div>
         </label>
 
@@ -141,7 +129,21 @@
   <!-- Settings -->
   <dialog id="settingsDialog">
     <form id="settingsForm" method="dialog">
-      <h3>Inställningar & delning</h3>
+      <h3>Databas och verktyg</h3>
+      <div class="tool-grid">
+        <button id="btnSaveFile" class="btn" type="button">Skapa/spara databasfil</button>
+        <button id="btnReconnect" class="btn ghost" type="button" style="display:none;">Återanslut databasfil</button>
+        <button id="btnPrintPDF" class="btn ghost" type="button">Skriv ut dagens schema</button>
+        <button id="btnExport" class="btn ghost" type="button">Exportera JSON</button>
+        <label class="file-btn btn ghost">
+          Importera JSON
+          <input id="importFile" type="file" accept="application/json" />
+        </label>
+        <button id="btnNewDB" class="btn danger" type="button">Ny tom databas</button>
+      </div>
+      <p class="hint">
+        För OneDrive-synk: lägg <code>schema-db.json</code> i den delade OneDrive-mappen och klicka på <strong>Koppla databas</strong> på varje dator. Appen autosparar till filen och hämtar ändringar ungefär var femte sekund.
+      </p>
       <div class="form-grid">
         <label>Datakälla-URL (läs in schema från länk – t.ex. OneDrive/GitHub/Gist)
           <input name="dataUrl" placeholder="https://..." />
@@ -154,8 +156,7 @@
         </label>
       </div>
       <p class="hint">
-        <strong>Lagring:</strong> Autosparar i webbläsaren. Koppla även till fil via “Spara som fil…” för att skriva till JSON.
-        <br><strong>OneDrive:</strong> appen försöker automatiskt tolka vanliga OneDrive-länkar i följ-läget, men bäst är en direkt nedladdningslänk till JSON.
+        URL-läget är bara för läsning. För vanlig delad redigering är databasfilen i OneDrive den stabila vägen.
       </p>
       <menu>
         <button value="cancel" class="btn ghost">Stäng</button>

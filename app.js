@@ -2,6 +2,7 @@
 (function () {
   const $ = (sel, el=document) => el.querySelector(sel);
   const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
+  const on = (sel, event, handler) => { const el = $(sel); if(el) el.addEventListener(event, handler); return el; };
 
   function conflictIconSrc() { 
     try { return follow.conflictIconDataUrl || "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23ef4444' d='M1,21H23L12,2'/><rect x='11' y='9' width='2' height='6' fill='white'/><rect x='11' y='17' width='2' height='2' fill='white'/></svg>"; } 
@@ -15,6 +16,7 @@
   const todayLocal = () => new Date();
   const ymd = (d) => `${d.getFullYear()}-${fmt(d.getMonth()+1)}-${fmt(d.getDate())}`;
   const randomColor = (s) => { let h=0; for (let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))%360; return `hsl(${h}deg 70% 50%)`; };
+  const DEFAULT_LESSON_COLOR = "#2d7f89";
   const byKlassOrder = (a, b) => {
     const parseK = (k) => { const m = String(k).toUpperCase().match(/^([7-9])([A-ZÅÄÖ])?$/); return m ? {grade:+m[1], letter:m[2]||""}:{grade:9,letter:"Z"}; };
     const A=parseK(a.klass), B=parseK(b.klass);
@@ -25,16 +27,34 @@
   // Keep storage key to avoid breaking saved data from v1.3
   const STORAGE_KEY = "schema_app_db_v1_3";
   const SETTINGS_KEY = STORAGE_KEY + "_settings";
+  const CLIENT_ID_KEY = STORAGE_KEY + "_client_id";
   const IDXDB_NAME = "schema_app_db"; const IDXDB_STORE = "handles";
+  const FILE_SYNC_INTERVAL_MS = 5000;
 
-  function emptyDB(){return {subjects:{},students:[],lessons:[],absences:{},meta:{createdAt:Date.now(),version:5}};}
-  let db = loadDB() || emptyDB();
+  function getClientId(){
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if(!id){
+      id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+      localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+    return id;
+  }
+  const clientId = getClientId();
+
+  function emptyDB(){return normalizeDB({subjects:{},students:[],lessons:[],absences:{},meta:{createdAt:Date.now(),version:6,updatedAt:Date.now()}});}
+  let db = normalizeDB(loadDB() || emptyDB());
   let follow = { dataUrl:"", pollSeconds:0, conflictIconDataUrl:"" };
 
   // File handle state
   let fileHandle = null;
   let fileSupported = !!(window.showOpenFilePicker && window.showSaveFilePicker);
   let fileName = "";
+  let fileSyncTimer = null;
+  let fileSnapshotHash = "";
+  let fileSnapshotModified = 0;
+  let fileWriting = false;
+  let fileWriteQueued = false;
+  let lastSyncedDb = cloneDB(db);
 
   // UI elements
   let currentWeekday=todayLocal().getDay(); if(currentWeekday===0) currentWeekday=1;
@@ -71,28 +91,32 @@
   };
 
   // Buttons
-  $("#btnAddLesson").addEventListener("click",()=>openLessonDialog(false));
-  $("#btnEditLesson").addEventListener("click",()=>showToast("Tips: Klicka på en lektionshuvudrad för att redigera."));
-  $("#btnAddStudent").addEventListener("click",()=>openStudentDialog(false));
-  $("#btnEditStudent").addEventListener("click",()=>showToast("Tips: Klicka på en elevrad för att redigera."));
-  $("#btnToday").addEventListener("click",()=>{ currentWeekday=todayLocal().getDay()||1; weekdaySelect.value=String(currentWeekday); render(); });
-  $("#btnPrintPDF").addEventListener("click",()=>window.print());
-  $("#btnExport").addEventListener("click",exportJSON);
-  $("#btnNewDB").addEventListener("click",()=>{ if(!confirm("Skapa ny TOM databas? Detta raderar nuvarande lokala data.")) return; db=emptyDB(); saveDB(); render(); });
-  $("#btnSettings").addEventListener("click",()=>openSettings());
-  $("#btnOpenFile").addEventListener("click",openFileViaPicker);
-  $("#btnSaveFile").addEventListener("click",saveFileViaPicker);
-  btnReconnect.addEventListener("click", reconnectFilePermission);
+  on("#btnAddLesson", "click", ()=>openLessonDialog(false));
+  on("#btnEditLesson", "click", ()=>showToast("Tips: Klicka på en lektionshuvudrad för att redigera."));
+  on("#btnAddStudent", "click", ()=>openStudentDialog(false));
+  on("#btnEditStudent", "click", ()=>showToast("Tips: Klicka på en elevrad för att redigera."));
+  on("#btnToday", "click", ()=>{ currentWeekday=todayLocal().getDay()||1; weekdaySelect.value=String(currentWeekday); render(); });
+  on("#btnPrintPDF", "click", ()=>window.print());
+  on("#btnExport", "click", exportJSON);
+  on("#btnNewDB", "click", ()=>{
+    const target = fileHandle ? "den kopplade databasfilen och lokal data" : "nuvarande lokala data";
+    if(!confirm(`Skapa ny TOM databas? Detta raderar ${target}.`)) return;
+    db=emptyDB(); saveDB(); render();
+  });
+  on("#btnSettings", "click", ()=>openSettings());
+  on("#btnOpenFile", "click", openFileViaPicker);
+  on("#btnSaveFile", "click", saveFileViaPicker);
+  if(btnReconnect) btnReconnect.addEventListener("click", reconnectFilePermission);
 
   // Import file
-  $("#importFile").addEventListener("change",(e)=>{
+  on("#importFile", "change", (e)=>{
     const file=e.target.files?.[0]; if(!file) return;
     const r=new FileReader();
     r.onload=()=>{ 
       try{ 
         const j=JSON.parse(r.result); 
         if(!j.students||!j.lessons) throw new Error("Ogiltig databasfil."); 
-        db=j; saveDB(); render(); showToast("Databas importerad."); 
+        db=normalizeDB(j); saveDB(); render(); showToast("Databas importerad."); 
       }catch(err){ alert("Kunde inte importera: "+err.message);} 
     };
     r.readAsText(file); e.target.value="";
@@ -116,7 +140,44 @@
   });
 
   // ----- DB persistence -----
-  function saveDB(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); setStatus("Autosparat"); saveToConnectedFile().catch(()=>{}); updateStorageInfo(); }
+  function normalizeDB(input){
+    const src = input && typeof input === "object" ? input : {};
+    const meta = src.meta && typeof src.meta === "object" ? src.meta : {};
+    const now = Date.now();
+    const lessons = Array.isArray(src.lessons) ? src.lessons.map(l=>({
+      ...l,
+      studentIds: Array.isArray(l.studentIds) ? l.studentIds : []
+    })).filter(l=>l && l.id) : [];
+    return {
+      subjects: src.subjects && typeof src.subjects === "object" && !Array.isArray(src.subjects) ? src.subjects : {},
+      students: Array.isArray(src.students) ? src.students.filter(s=>s && s.id) : [],
+      lessons,
+      absences: src.absences && typeof src.absences === "object" && !Array.isArray(src.absences) ? src.absences : {},
+      meta: {
+        ...meta,
+        createdAt: meta.createdAt || now,
+        version: Math.max(Number(meta.version || 0), 6)
+      }
+    };
+  }
+  function cloneDB(value){ return JSON.parse(JSON.stringify(normalizeDB(value))); }
+  function isValidDB(value){ return !!(value && Array.isArray(value.students) && Array.isArray(value.lessons)); }
+  function touchDB(){
+    db = normalizeDB(db);
+    db.meta.updatedAt = Date.now();
+    db.meta.updatedBy = clientId;
+    db.meta.version = 6;
+  }
+  function persistLocalDB(status){
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    if(status) setStatus(status);
+    updateStorageInfo();
+  }
+  function saveDB(options={}){
+    if(!options.fromRemote) touchDB();
+    persistLocalDB(options.status || (fileHandle ? "Autosparat till databasfil" : "Autosparat lokalt"));
+    if(options.writeFile !== false) queueSaveToConnectedFile();
+  }
   function loadDB(){ try{ const raw=localStorage.getItem(STORAGE_KEY); return raw?JSON.parse(raw):null; }catch{ return null; } }
   function saveSettings(){ localStorage.setItem(SETTINGS_KEY, JSON.stringify(follow)); }
   function loadSettings(){ try{ const raw=localStorage.getItem(SETTINGS_KEY); if(raw) follow=JSON.parse(raw);}catch{} }
@@ -157,10 +218,11 @@
       const perm = await h.queryPermission({mode:"readwrite"});
       if (perm === "granted") {
         fileHandle = h; fileName = h.name || "(fil)";
-        showToast("Fil återansluten.");
+        await loadConnectedFile({status:"Synkad från återansluten fil", toast:"Fil återansluten."});
+        startFileSync();
         updateStorageInfo();
       } else {
-        btnReconnect.style.display = "inline-block";
+        if(btnReconnect) btnReconnect.style.display = "inline-block";
       }
     } catch (e) {
       console.warn("Återanslutning misslyckades:", e);
@@ -172,8 +234,9 @@
       const perm = await h.requestPermission({mode:"readwrite"});
       if (perm === "granted") {
         fileHandle = h; fileName = h.name || "(fil)";
-        btnReconnect.style.display = "none";
-        showToast("Fil återansluten.");
+        if(btnReconnect) btnReconnect.style.display = "none";
+        await loadConnectedFile({status:"Synkad från återansluten fil", toast:"Fil återansluten."});
+        startFileSync();
         updateStorageInfo();
       } else {
         alert("Behörighet nekad. Välj fil igen via Öppna/Spara som.");
@@ -184,9 +247,9 @@
   }
 
   // ---------- Rendering ----------
-  function subjectColor(subj){ if(!db.subjects[subj]) db.subjects[subj]=randomColor(subj); return db.subjects[subj]; }
+  function subjectColor(subj){ return db.subjects[subj] || randomColor(subj); }
 
-  function render(){ renderLessons(); renderStudentList(); saveDB(); }
+  function render(){ renderLessons(); renderStudentList(); updateStorageInfo(); }
 
   function renderLessons(){
     mixContainer.innerHTML=""; bigContainer.innerHTML="";
@@ -329,11 +392,11 @@
       if (lessonForm.elements["weekday"])  lessonForm.elements["weekday"].value  = String(target.weekday);
       if (lessonForm.elements["start"])    lessonForm.elements["start"].value    = target.start || "";
       if (lessonForm.elements["end"])      lessonForm.elements["end"].value      = target.end || "";
-      if (lessonForm.elements["color"])    lessonForm.elements["color"].value    = target.color || "#1d4ed8";
+      if (lessonForm.elements["color"])    lessonForm.elements["color"].value    = target.color || DEFAULT_LESSON_COLOR;
       if (lessonForm.elements["resource"]) lessonForm.elements["resource"].value = target.resource || "";
       if (lessonForm.elements["comment"])  lessonForm.elements["comment"].value  = target.comment || "";
 
-      initLessonColorUI(target.color || "#1d4ed8");
+      initLessonColorUI(target.color || DEFAULT_LESSON_COLOR);
       $$("#lessonStudentsSelect option").forEach(opt=>{ opt.selected=target.studentIds.includes(opt.value); });
       btnDeleteLesson.hidden=false; btnDeleteLesson.onclick=()=>{
         if(!confirm("Ta bort lektion?")) return;
@@ -349,10 +412,10 @@
       if (lessonForm.reset) try { lessonForm.reset(); } catch {}
       if (lessonForm.elements["weekday"]) lessonForm.elements["weekday"].value = String(currentWeekday);
       btnDeleteLesson.hidden=true;
-      if (lessonForm.elements["color"]) lessonForm.elements["color"].value = "#1d4ed8";
+      if (lessonForm.elements["color"]) lessonForm.elements["color"].value = DEFAULT_LESSON_COLOR;
       if (lessonForm.elements["resource"]) lessonForm.elements["resource"].value = "";
       if (lessonForm.elements["comment"]) lessonForm.elements["comment"].value = "";
-      initLessonColorUI("#1d4ed8");
+      initLessonColorUI(DEFAULT_LESSON_COLOR);
       lessonDialog.showModal(); lessonDialog.returnValue=""; lessonDialog.addEventListener("close", onLessonDialogClose, {once:true, passive:true});
     }
   }
@@ -360,7 +423,7 @@
   function initLessonColorUI(defaultColor){
     try {
       if (!colorEls.input) return;
-      const c = defaultColor || colorEls.input.value || "#1d4ed8";
+      const c = defaultColor || colorEls.input.value || DEFAULT_LESSON_COLOR;
       colorEls.input.value = c;
       if (colorEls.swatch) colorEls.swatch.style.background = c;
       if (colorEls.button) colorEls.button.onclick = () => colorEls.input.click();
@@ -449,9 +512,9 @@
     settingsForm.reset(); settingsForm.elements["dataUrl"].value=follow.dataUrl||""; settingsForm.elements["pollSeconds"].value=follow.pollSeconds||0;
     settingsDialog.showModal(); settingsDialog.returnValue="";
     settingsDialog.addEventListener("close", onSettingsClose, {once:true,passive:true});
-    settingsForm.elements["conflictIcon"].addEventListener("change",(e)=>{
+    settingsForm.elements["conflictIcon"].onchange=(e)=>{
       const file=e.target.files?.[0]; if(!file) return; const r=new FileReader(); r.onload=()=>{ follow.conflictIconDataUrl=r.result; saveSettings(); showToast("Ikon uppdaterad."); }; r.readAsDataURL(file);
-    });
+    };
   }
   function onSettingsClose(e){
     if(settingsDialog.returnValue!=="save") return;
@@ -567,7 +630,8 @@
               }
 
               if(json.students&&json.lessons){
-                db=json; saveDB(); render(); showToast("Datakälla uppdaterad."); lastHash=hash;
+                applyRemoteDB(json, {status:"Datakälla uppdaterad", toast:"Datakälla uppdaterad."});
+                lastHash=hash;
               } else {
                 lastErr = new Error("Datakälla saknar students/lessons.");
                 continue;
@@ -597,33 +661,240 @@
     window._pollTimer=setInterval(tick, Math.max(5, follow.pollSeconds)*1000);
   }
 
-  async function digest(str){ const enc=new TextEncoder().encode(str); const buf=await crypto.subtle.digest("SHA-256",enc); return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join(""); }
+  async function digest(str){
+    const text = String(str);
+    if(window.crypto && crypto.subtle){
+      const enc=new TextEncoder().encode(text);
+      const buf=await crypto.subtle.digest("SHA-256",enc);
+      return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    }
+    let h = 2166136261;
+    for(let i=0;i<text.length;i++){ h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return "fnv-" + (h >>> 0).toString(16);
+  }
 
   // ---------- File System Access ----------
+  function sameData(a,b){ return JSON.stringify(a ?? null) === JSON.stringify(b ?? null); }
+  function mergeArrayById(baseArr=[], localArr=[], remoteArr=[]){
+    const baseMap=new Map(baseArr.map(x=>[x.id,x]));
+    const localMap=new Map(localArr.map(x=>[x.id,x]));
+    const remoteMap=new Map(remoteArr.map(x=>[x.id,x]));
+    const ids=[...localArr.map(x=>x.id), ...remoteArr.map(x=>x.id), ...baseArr.map(x=>x.id)]
+      .filter((id,idx,arr)=>id && arr.indexOf(id)===idx);
+    const items=[]; let conflicts=0;
+    for(const id of ids){
+      const b=baseMap.get(id), l=localMap.get(id), r=remoteMap.get(id);
+      const localChanged=!sameData(l,b);
+      const remoteChanged=!sameData(r,b);
+      if(localChanged && remoteChanged && !sameData(l,r)) conflicts++;
+      const chosen = localChanged ? l : r;
+      if(chosen) items.push(chosen);
+    }
+    return {items, conflicts};
+  }
+  function mergePlainObject(base={}, local={}, remote={}){
+    const keys=Array.from(new Set([...Object.keys(base||{}), ...Object.keys(local||{}), ...Object.keys(remote||{})]));
+    const result={}; let conflicts=0;
+    for(const key of keys){
+      const b=base?.[key], l=local?.[key], r=remote?.[key];
+      const localChanged=!sameData(l,b);
+      const remoteChanged=!sameData(r,b);
+      if(localChanged && remoteChanged && !sameData(l,r)) conflicts++;
+      const chosen = localChanged ? l : r;
+      if(chosen !== undefined) result[key]=chosen;
+    }
+    return {value:result, conflicts};
+  }
+  function mergeAbsences(base={}, local={}, remote={}){
+    const dates=Array.from(new Set([...Object.keys(base||{}), ...Object.keys(local||{}), ...Object.keys(remote||{})]));
+    const result={}; let conflicts=0;
+    for(const date of dates){
+      const ids=Array.from(new Set([
+        ...Object.keys(base?.[date]||{}),
+        ...Object.keys(local?.[date]||{}),
+        ...Object.keys(remote?.[date]||{})
+      ]));
+      for(const id of ids){
+        const b=!!base?.[date]?.[id], l=!!local?.[date]?.[id], r=!!remote?.[date]?.[id];
+        const localChanged=l!==b, remoteChanged=r!==b;
+        if(localChanged && remoteChanged && l!==r) conflicts++;
+        const chosen = localChanged ? l : r;
+        if(chosen){
+          if(!result[date]) result[date]={};
+          result[date][id]=true;
+        }
+      }
+    }
+    return {value:result, conflicts};
+  }
+  function mergeDB(base, local, remote){
+    const b=normalizeDB(base), l=normalizeDB(local), r=normalizeDB(remote);
+    const subjects=mergePlainObject(b.subjects, l.subjects, r.subjects);
+    const students=mergeArrayById(b.students, l.students, r.students);
+    const lessons=mergeArrayById(b.lessons, l.lessons, r.lessons);
+    const absences=mergeAbsences(b.absences, l.absences, r.absences);
+    return {
+      db: normalizeDB({
+        subjects: subjects.value,
+        students: students.items,
+        lessons: lessons.items,
+        absences: absences.value,
+        meta: {
+          ...l.meta,
+          createdAt: l.meta.createdAt || r.meta.createdAt || b.meta.createdAt || Date.now(),
+          version: 6,
+          updatedAt: Date.now(),
+          updatedBy: clientId
+        }
+      }),
+      conflicts: subjects.conflicts + students.conflicts + lessons.conflicts + absences.conflicts
+    };
+  }
+  function applyRemoteDB(remote, options={}){
+    db = normalizeDB(remote);
+    lastSyncedDb = cloneDB(db);
+    persistLocalDB(options.status || "Synkad");
+    render();
+    if(options.toast) showToast(options.toast);
+  }
+  async function readFileDB(handle){
+    const file=await handle.getFile();
+    const text=await file.text();
+    const json=JSON.parse(text);
+    if(!isValidDB(json)) throw new Error("Ogiltig databasfil.");
+    return {file, text, json:normalizeDB(json), hash:await digest(text)};
+  }
+  async function loadConnectedFile(options={}){
+    const snap=await readFileDB(fileHandle);
+    fileSnapshotHash=snap.hash;
+    fileSnapshotModified=snap.file.lastModified || Date.now();
+    applyRemoteDB(snap.json, {status:options.status || "Synkad från databasfil"});
+    if(options.toast) showToast(options.toast);
+    return true;
+  }
+  function startFileSync(){
+    if(fileSyncTimer) clearInterval(fileSyncTimer);
+    if(!fileHandle) return;
+    fileSyncTimer=setInterval(()=>checkConnectedFileForChanges(), FILE_SYNC_INTERVAL_MS);
+    checkConnectedFileForChanges({quiet:true});
+  }
+  async function checkConnectedFileForChanges(options={}){
+    if(!fileHandle || fileWriting) return;
+    try{
+      const snap=await readFileDB(fileHandle);
+      if(snap.hash===fileSnapshotHash){
+        fileSnapshotModified=snap.file.lastModified || fileSnapshotModified;
+        if(!options.quiet) setStatus("Synkad med databasfil");
+        return;
+      }
+      fileSnapshotHash=snap.hash;
+      fileSnapshotModified=snap.file.lastModified || Date.now();
+      applyRemoteDB(snap.json, {status:"Ändringar hämtade från databasfil"});
+      if(!options.quiet) showToast("Ändringar från OneDrive hämtade.");
+    }catch(e){
+      setStatus("Kunde inte läsa databasfil");
+      console.warn("Filsynk misslyckades:", e);
+    }
+  }
+  function queueSaveToConnectedFile(){
+    if(!fileHandle) return;
+    fileWriteQueued=true;
+    processFileWriteQueue();
+  }
+  async function processFileWriteQueue(){
+    if(fileWriting) return;
+    fileWriting=true;
+    try{
+      while(fileWriteQueued && fileHandle){
+        fileWriteQueued=false;
+        await saveToConnectedFile();
+      }
+    } finally {
+      fileWriting=false;
+    }
+  }
+  async function mergeRemoteFileIfNeeded(){
+    if(!fileHandle) return;
+    try{
+      const snap=await readFileDB(fileHandle);
+      if(!fileSnapshotHash || snap.hash===fileSnapshotHash){
+        fileSnapshotHash=snap.hash;
+        fileSnapshotModified=snap.file.lastModified || fileSnapshotModified;
+        return;
+      }
+      const merged=mergeDB(lastSyncedDb, db, snap.json);
+      db=merged.db;
+      persistLocalDB("Slog ihop ändringar före sparning");
+      render();
+      showToast(merged.conflicts ? "Slog ihop ändringar. Kontrollera senaste ändringen." : "Slog ihop ändringar från OneDrive.");
+    }catch(e){
+      console.warn("Kunde inte läsa databasfil inför sparning:", e);
+    }
+  }
   async function openFileViaPicker(){
+    const previous = {handle:fileHandle, name:fileName, hash:fileSnapshotHash, modified:fileSnapshotModified};
     try{
       if(!fileSupported) return alert("Öppna fil stöds inte i denna webbläsare. Prova Chrome/Edge.");
-      const [handle]=await window.showOpenFilePicker({types:[{description:"JSON",accept:{"application/json":[".json"]}}],excludeAcceptAllOption:false,multiple:false});
-      const file=await handle.getFile(); const text=await file.text(); const json=JSON.parse(text);
-      if(!json.students||!json.lessons) throw new Error("Ogiltig databasfil.");
-      fileHandle=handle; fileName=handle.name; await persistHandle(handle);
-      db=json; saveDB(); render(); showToast("Fil öppnad och kopplad. Autosparar till filen."); updateStorageInfo(); btnReconnect.style.display="none";
-    }catch(e){ if(e && e.name!=="AbortError") alert("Kunde inte öppna fil: "+e.message); }
+      const [handle]=await window.showOpenFilePicker({types:[{description:"Schema-databas (JSON)",accept:{"application/json":[".json"]}}],excludeAcceptAllOption:false,multiple:false});
+      fileHandle=handle; fileName=handle.name;
+      await loadConnectedFile({status:"Synkad från databasfil", toast:"Databasfil kopplad. Synken är igång."});
+      await persistHandle(handle);
+      startFileSync();
+      updateStorageInfo();
+      if(btnReconnect) btnReconnect.style.display="none";
+    }catch(e){
+      fileHandle=previous.handle; fileName=previous.name; fileSnapshotHash=previous.hash; fileSnapshotModified=previous.modified;
+      if(e && e.name!=="AbortError") alert("Kunde inte öppna fil: "+e.message);
+    }
   }
   async function saveFileViaPicker(){
+    const previous = {handle:fileHandle, name:fileName, hash:fileSnapshotHash, modified:fileSnapshotModified};
     try{
       if(fileSupported){
+        let newHandle=false;
         if(!fileHandle){
-          fileHandle=await window.showSaveFilePicker({suggestedName:"schema-db.json",types:[{description:"JSON",accept:{"application/json":[".json"]}}]});
-          fileName=fileHandle.name; await persistHandle(fileHandle);
+          fileHandle=await window.showSaveFilePicker({suggestedName:"schema-db.json",types:[{description:"Schema-databas (JSON)",accept:{"application/json":[".json"]}}]});
+          fileName=fileHandle.name; newHandle=true;
         }
-        await writeToFileHandle(fileHandle, JSON.stringify(db,null,2)); showToast("Sparat till fil."); updateStorageInfo(); btnReconnect.style.display="none";
+        const saved = await saveToConnectedFile();
+        if(!saved){
+          if(newHandle){ fileHandle=previous.handle; fileName=previous.name; fileSnapshotHash=previous.hash; fileSnapshotModified=previous.modified; }
+          return;
+        }
+        if(newHandle) await persistHandle(fileHandle);
+        startFileSync();
+        showToast("Databasfil skapad och kopplad.");
+        updateStorageInfo();
+        if(btnReconnect) btnReconnect.style.display="none";
       } else {
         exportJSON();
       }
     }catch(e){ if(e && e.name!=="AbortError") alert("Kunde inte spara fil: "+e.message); }
   }
-  async function saveToConnectedFile(){ if(!fileHandle) return; try{ await writeToFileHandle(fileHandle, JSON.stringify(db,null,2)); }catch(e){ console.warn("Autosave-to-file misslyckades:",e); } }
+  async function saveToConnectedFile(){
+    if(!fileHandle) return false;
+    try{
+      await mergeRemoteFileIfNeeded();
+      const text=JSON.stringify(normalizeDB(db),null,2);
+      const hash=await digest(text);
+      await writeToFileHandle(fileHandle, text);
+      fileSnapshotHash=hash;
+      try{
+        const file=await fileHandle.getFile();
+        fileSnapshotModified=file.lastModified || Date.now();
+      }catch{
+        fileSnapshotModified=Date.now();
+      }
+      lastSyncedDb=cloneDB(db);
+      setStatus("Sparat och synkat");
+      updateStorageInfo();
+      return true;
+    }catch(e){
+      setStatus("Kunde inte spara databasfil");
+      console.warn("Autosave-to-file misslyckades:",e);
+      return false;
+    }
+  }
   async function writeToFileHandle(handle,text){ const perm=await handle.requestPermission({mode:"readwrite"}); if(perm!=="granted") throw new Error("Behörighet nekad"); const w=await handle.createWritable(); await w.write(text); await w.close(); }
 
   // ---------- Misc helpers ----------
@@ -635,7 +906,12 @@
   function setStatus(msg){ statusText.textContent=msg; }
   function showToast(msg){ toast.textContent=msg; toast.classList.add("show"); setTimeout(()=>toast.classList.remove("show"),1800); }
   function escapeHTML(s){ return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
-  function updateStorageInfo(){ const parts=["Lagring: Lokal webbläsare"]; if(fileHandle) parts.push(`+ Fil: ${fileName||"(kopplad)"}`); if(follow.dataUrl) parts.push(`+ Följ-läge från URL`); storageInfo.textContent=parts.join(" • "); }
+  function updateStorageInfo(){
+    const parts=[fileHandle ? `Synk: ${fileName||"databasfil"}` : "Synk: lokal webbläsare"];
+    if(fileHandle) parts.push("läser OneDrive-fil var 5:e sekund");
+    if(follow.dataUrl) parts.push("följ-läge från URL");
+    storageInfo.textContent=parts.join(" • ");
+  }
 
   // Init
   render(); setupPolling(); updateStorageInfo(); restoreHandle();
